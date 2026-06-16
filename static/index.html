@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PIG Portal</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="navbar">
+    <h1 id="navTitle" title="Return to Home Dashboard" tabindex="0">🐖 PIG Portal</h1>
+    <div class="project-selector">
+      <button class="btn btn-secondary" id="homeBtn" type="button">Home</button>
+      <select id="projectDropdown" aria-label="Jump to project">
+        <option value="" disabled selected>-- Jump to Project --</option>
+      </select>
+      <button class="btn btn-success" id="newProjectBtn" type="button">+ New Project</button>
+    </div>
+  </div>
+
+  <div class="container" id="alertContainer" aria-live="polite"></div>
+
+  <div class="container" id="globalDashboard">
+    <div class="page-header">
+      <div>
+        <h2>All Projects Overview</h2>
+        <p class="muted" id="serverStatus">Loading project database...</p>
+        <p class="muted" id="lockStatus"></p>
+      </div>
+      <div class="header-actions">
+        <button class="btn btn-secondary" id="refreshBtn" type="button">Refresh From DB</button>
+        <button class="btn btn-secondary" id="backupBtn" type="button">Create DB Backup</button>
+      </div>
+    </div>
+
+    <div class="filter-bar" role="tablist" aria-label="Project status filter">
+      <button class="btn filter-btn active" id="filter-All" type="button" data-filter="All">All Projects</button>
+      <button class="btn filter-btn" id="filter-Active" type="button" data-filter="Active">Active</button>
+      <button class="btn filter-btn" id="filter-Inactive" type="button" data-filter="Inactive">Inactive</button>
+      <button class="btn filter-btn" id="filter-Completed" type="button" data-filter="Completed">Completed</button>
+    </div>
+
+    <div id="projectCardsContainer" class="cards-grid" aria-live="polite"></div>
+  </div>
+
+  <div class="container" id="mainContent" hidden>
+    <div class="project-info">
+      <button class="btn btn-danger delete-project-btn" id="deleteProjectBtn" type="button">Delete Project</button>
+      <h2 id="projNameTitle">Loading...</h2>
+      <p>
+        <strong>Project Name:</strong>
+        <input type="text" id="projName" class="editable-input" autocomplete="off" maxlength="150">
+      </p>
+      <p>
+        <strong>Project Status:</strong>
+        <select id="projStatus">
+          <option value="Active">Active</option>
+          <option value="Inactive">Inactive</option>
+          <option value="Completed">Completed</option>
+        </select>
+      </p>
+      <p><strong>Assigned To:</strong> <input type="text" id="projAssignee" class="editable-input" autocomplete="off" maxlength="500"></p>
+      <p><strong>Start Date:</strong> <input type="text" id="projStartDate" class="editable-input" autocomplete="off" maxlength="100"></p>
+      <p><strong>Total Time:</strong> <input type="text" id="projTotalTime" class="editable-input" autocomplete="off" maxlength="100"></p>
+      <p><strong>Final ETIC:</strong> <input type="text" id="projEtic" class="editable-input" autocomplete="off" maxlength="100"></p>
+    </div>
+
+    <div class="progress-wrapper">
+      <h3>Project Progress</h3>
+      <div class="progress-bar-container">
+        <div id="progressBar" class="progress-bar">0%</div>
+      </div>
+      <p id="progressText">0% Complete (0/0 tasks)</p>
+    </div>
+
+    <div class="controls">
+      <input type="text" id="searchInput" placeholder="Search steps by issue, tool, etc..." autocomplete="off">
+      <div class="row-actions">
+        <button class="btn btn-secondary" id="refreshProjectBtn" type="button">Refresh Project</button>
+        <button class="btn btn-primary" id="addStepBtn" type="button">+ Add New Step</button>
+      </div>
+    </div>
+
+    <div class="table-wrapper">
+      <table id="trackerTable">
+        <thead>
+          <tr>
+            <th class="col-step">Step</th>
+            <th>Issue</th>
+            <th>Tool/Action Item</th>
+            <th class="col-etic">ETIC</th>
+            <th class="col-status">Status</th>
+            <th class="col-actions">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>
