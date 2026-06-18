@@ -1,7 +1,31 @@
 # PIG Portal Desktop Shared-Database Build
 
-This version is built for the scenario where there is **no always-on server**.
-Each user launches the EXE, the EXE starts a small local web server on that user's machine, opens the browser, and reads/writes the same SQLite database file on the shared drive.
+This build is for the no-always-on-server setup: each user launches the EXE, the EXE starts a small local web server on that user's machine, opens the browser, and reads/writes the same SQLite database file on the shared drive.
+
+## New in this version
+
+- Next Meeting banner at the top of the app
+  - Date/time uses the browser's native calendar picker via `datetime-local`
+  - Location is stored beside the date/time
+  - Saved in the shared SQLite database
+- Meeting Notes / Journal page
+  - Accessible from the top **Notes** button
+  - Also accessible from the navigation dropdown
+  - Notes are stored in the database and displayed chronologically
+- Members / Info page
+  - Stores member name, position, email, phone, and notes
+  - Accessible from the top **Members** button
+  - Also accessible from the navigation dropdown
+- Project and step notes
+  - Each project has a saved **Project Notes** section
+  - Each project step has a saved **Step Notes** field
+  - Both are stored in the shared SQLite database
+- Excel export
+  - Top **Export Excel** button downloads an `.xlsx` workbook
+  - Project data is split into separate worksheets by project status
+  - Project notes and step notes are included in the project worksheets
+  - Meeting notes have their own worksheet
+  - Members and next meeting data are also exported
 
 ## Reality check
 
@@ -112,6 +136,29 @@ http://127.0.0.1:54321/
 
 Every user gets their own local browser session, but all users write to the same database path configured in `pig_portal_config.ini`.
 
+## Latest layout update
+
+The meeting banner places **Edit Meeting** immediately beside the next meeting information. The database action buttons — **Refresh From DB**, **Create DB Backup**, and **Export Excel** — are on the same banner bar to the right.
+
+## Latest data update
+
+Projects now include a saved **Project Notes** textarea. Every step row now includes a saved **Step Notes** textarea. Existing databases are migrated automatically on startup by adding `projects.notes` and `steps.notes` if they are missing.
+
+## Excel export
+
+Click **Export Excel** from the meeting/banner bar. The browser will download an `.xlsx` file. Depending on the user's browser policy, it may prompt for a save location or save to Downloads automatically.
+
+Worksheets included:
+
+- `Active Projects`
+- `Completed Projects`
+- `Inactive Projects`
+- `Meeting Notes`
+- `Members`
+- `Next Meeting`
+
+The project worksheets include both **Project Notes** and **Step Notes** columns. The export uses `openpyxl`, which is included in `requirements.txt` and bundled by the PyInstaller spec.
+
 ## Lock behavior
 
 When a user saves, the app creates this folder beside the database:
@@ -133,7 +180,7 @@ If users see repeated lock errors:
 
 ## Backups
 
-Use **Create DB Backup** from the dashboard. Backups are SQLite `.db` snapshots saved to the configured `backup_dir`.
+Use **Create DB Backup** from the meeting/banner bar. Backups are SQLite `.db` snapshots saved to the configured `backup_dir`.
 
 ## Known limitations
 
@@ -141,4 +188,5 @@ Use **Create DB Backup** from the dashboard. Backups are SQLite `.db` snapshots 
 - Two users editing the same exact field can still overwrite each other; last save wins.
 - The shared drive must allow users to create/delete folders and write files in the database directory.
 - Do not use SQLite WAL mode on this design.
+- Browser download behavior controls whether Excel export prompts for a save location or saves directly to Downloads.
 - If this becomes mission-critical or heavily used, move to a real server or SharePoint Lists/Graph.

@@ -9,6 +9,7 @@ import datetime as dt
 import hmac
 import json
 import logging
+from io import BytesIO
 import os
 import pathlib
 import secrets
@@ -22,9 +23,10 @@ import uuid
 import webbrowser
 from typing import Any, Iterable
 
-from flask import Flask, Response, abort, g, jsonify, request, send_from_directory
+from flask import Flask, Response, abort, g, jsonify, request, send_file, send_from_directory
 
 VALID_PROJECT_STATUSES = {"Active", "Inactive", "Completed"}
+PROJECT_STATUS_ORDER = ("Active", "Inactive", "Completed")
 VALID_STEP_STATUSES = {"Not Started", "In Work", "C/W", ""}
 WRITE_LOCK = threading.RLock()
 
@@ -136,7 +138,7 @@ setup_logging()
 
 
 def utc_now() -> str:
-    return dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
 
 def clean_text(value: Any, max_len: int = 500) -> str:
@@ -436,6 +438,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             start_date TEXT NOT NULL DEFAULT '',
             total_time TEXT NOT NULL DEFAULT '',
             etic TEXT NOT NULL DEFAULT '',
+            notes TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -449,6 +452,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             etic TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'Not Started'
                 CHECK (status IN ('Not Started', 'In Work', 'C/W')),
+            notes TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -456,8 +460,49 @@ def init_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_steps_project_position
             ON steps(project_id, position, id);
+
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS meeting_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            note_date TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            body TEXT NOT NULL DEFAULT '',
+            author TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_meeting_notes_date
+            ON meeting_notes(note_date, created_at, id);
+
+        CREATE TABLE IF NOT EXISTS members (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL DEFAULT '',
+            position TEXT NOT NULL DEFAULT '',
+            email TEXT NOT NULL DEFAULT '',
+            phone TEXT NOT NULL DEFAULT '',
+            notes TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_members_name
+            ON members(name COLLATE NOCASE, position COLLATE NOCASE);
         """
     )
+    ensure_column(conn, "projects", "notes", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(conn, "steps", "notes", "TEXT NOT NULL DEFAULT ''")
+
+
+def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    existing_columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in existing_columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def seed_defaults_if_empty(conn: sqlite3.Connection) -> None:
@@ -470,8 +515,8 @@ def seed_defaults_if_empty(conn: sqlite3.Connection) -> None:
         cursor = conn.execute(
             """
             INSERT INTO projects
-                (name, status, assignee, start_date, total_time, etic, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (name, status, assignee, start_date, total_time, etic, notes, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
@@ -480,6 +525,7 @@ def seed_defaults_if_empty(conn: sqlite3.Connection) -> None:
                 clean_text(project.get("startDate"), 100),
                 clean_text(project.get("totalTime"), 100),
                 clean_text(project.get("etic"), 100),
+                clean_text(project.get("notes"), 10000),
                 now,
                 now,
             ),
@@ -489,8 +535,8 @@ def seed_defaults_if_empty(conn: sqlite3.Connection) -> None:
             conn.execute(
                 """
                 INSERT INTO steps
-                    (project_id, position, issue, tool, etic, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (project_id, position, issue, tool, etic, status, notes, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
@@ -499,6 +545,7 @@ def seed_defaults_if_empty(conn: sqlite3.Connection) -> None:
                     clean_text(step.get("tool"), 1000),
                     clean_text(step.get("etic"), 100),
                     normalize_step_status(step.get("status")),
+                    clean_text(step.get("notes"), 10000),
                     now,
                     now,
                 ),
@@ -528,6 +575,7 @@ def row_to_project(row: sqlite3.Row, steps: list[dict[str, Any]] | None = None) 
         "startDate": row["start_date"],
         "totalTime": row["total_time"],
         "etic": row["etic"],
+        "notes": row["notes"],
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
         "steps": steps or [],
@@ -543,8 +591,64 @@ def row_to_step(row: sqlite3.Row) -> dict[str, Any]:
         "tool": row["tool"],
         "etic": row["etic"],
         "status": row["status"],
+        "notes": row["notes"],
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
+    }
+
+
+def row_to_note(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "noteDate": row["note_date"],
+        "title": row["title"],
+        "body": row["body"],
+        "author": row["author"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def row_to_member(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "position": row["position"],
+        "email": row["email"],
+        "phone": row["phone"],
+        "notes": row["notes"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def get_setting(conn: sqlite3.Connection, key: str) -> str:
+    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else ""
+
+
+def set_setting(conn: sqlite3.Connection, key: str, value: Any) -> None:
+    now = utc_now()
+    conn.execute(
+        """
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        """,
+        (key, clean_text(value, 2000), now),
+    )
+
+
+def get_meeting_payload(conn: sqlite3.Connection) -> dict[str, str]:
+    rows = conn.execute(
+        "SELECT key, value, updated_at FROM app_settings WHERE key IN ('next_meeting_at', 'next_meeting_location')"
+    ).fetchall()
+    values = {row['key']: row['value'] for row in rows}
+    updated = [row['updated_at'] for row in rows if row['updated_at']]
+    return {
+        "meetingAt": values.get("next_meeting_at", ""),
+        "location": values.get("next_meeting_location", ""),
+        "updatedAt": max(updated) if updated else "",
     }
 
 
@@ -728,8 +832,8 @@ def create_app() -> Flask:
             cursor = conn.execute(
                 """
                 INSERT INTO projects
-                    (name, status, assignee, start_date, total_time, etic, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (name, status, assignee, start_date, total_time, etic, notes, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     name,
@@ -738,6 +842,7 @@ def create_app() -> Flask:
                     clean_text(payload.get("startDate"), 100),
                     clean_text(payload.get("totalTime"), 100),
                     clean_text(payload.get("etic"), 100),
+                    clean_text(payload.get("notes"), 10000),
                     now,
                     now,
                 ),
@@ -756,6 +861,7 @@ def create_app() -> Flask:
             "startDate": ("start_date", lambda value: clean_text(value, 100)),
             "totalTime": ("total_time", lambda value: clean_text(value, 100)),
             "etic": ("etic", lambda value: clean_text(value, 100)),
+            "notes": ("notes", lambda value: clean_text(value, 10000)),
         }
 
         assignments: list[str] = []
@@ -808,8 +914,8 @@ def create_app() -> Flask:
             cursor = conn.execute(
                 """
                 INSERT INTO steps
-                    (project_id, position, issue, tool, etic, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (project_id, position, issue, tool, etic, status, notes, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
@@ -818,6 +924,7 @@ def create_app() -> Flask:
                     clean_text(payload.get("tool"), 1000),
                     clean_text(payload.get("etic"), 100),
                     normalize_step_status(payload.get("status", "Not Started")),
+                    clean_text(payload.get("notes"), 10000),
                     now,
                     now,
                 ),
@@ -835,6 +942,7 @@ def create_app() -> Flask:
             "tool": ("tool", lambda value: clean_text(value, 1000)),
             "etic": ("etic", lambda value: clean_text(value, 100)),
             "status": ("status", normalize_step_status),
+            "notes": ("notes", lambda value: clean_text(value, 10000)),
         }
 
         assignments: list[str] = []
@@ -874,6 +982,162 @@ def create_app() -> Flask:
             conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (utc_now(), project_id))
         return jsonify({"deleted": True, "stepId": step_id})
 
+    @app.get("/api/meeting")
+    def get_meeting() -> Response:
+        return jsonify({"meeting": get_meeting_payload(db())})
+
+    @app.patch("/api/meeting")
+    def update_meeting() -> Response:
+        payload = require_json()
+        meeting_at = clean_text(payload.get("meetingAt"), 80)
+        location = clean_text(payload.get("location"), 500)
+        with transaction() as conn:
+            set_setting(conn, "next_meeting_at", meeting_at)
+            set_setting(conn, "next_meeting_location", location)
+            meeting = get_meeting_payload(conn)
+        return jsonify({"meeting": meeting})
+
+    @app.get("/api/notes")
+    def list_notes() -> Response:
+        rows = db().execute(
+            "SELECT * FROM meeting_notes ORDER BY note_date ASC, created_at ASC, id ASC"
+        ).fetchall()
+        return jsonify({"notes": [row_to_note(row) for row in rows], "time": utc_now()})
+
+    @app.post("/api/notes")
+    def create_note() -> tuple[Response, int]:
+        payload = require_json()
+        now = utc_now()
+        note_date = clean_text(payload.get("noteDate"), 80) or now
+        with transaction() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO meeting_notes (note_date, title, body, author, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    note_date,
+                    clean_text(payload.get("title"), 200),
+                    clean_text(payload.get("body"), 10000),
+                    clean_text(payload.get("author"), 200),
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute("SELECT * FROM meeting_notes WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
+        return jsonify({"note": row_to_note(row)}), 201
+
+    @app.patch("/api/notes/<int:note_id>")
+    def update_note(note_id: int) -> Response:
+        payload = require_json()
+        allowed_fields = {
+            "noteDate": ("note_date", lambda value: clean_text(value, 80)),
+            "title": ("title", lambda value: clean_text(value, 200)),
+            "body": ("body", lambda value: clean_text(value, 10000)),
+            "author": ("author", lambda value: clean_text(value, 200)),
+        }
+        assignments: list[str] = []
+        values: list[Any] = []
+        for key, (column, cleaner) in allowed_fields.items():
+            if key in payload:
+                assignments.append(f"{column} = ?")
+                values.append(cleaner(payload[key]))
+        if not assignments:
+            abort(400, description="No editable note fields were provided.")
+        assignments.append("updated_at = ?")
+        values.append(utc_now())
+        values.append(note_id)
+        with transaction() as conn:
+            existing = conn.execute("SELECT * FROM meeting_notes WHERE id = ?", (note_id,)).fetchone()
+            if existing is None:
+                abort(404, description="Meeting note not found.")
+            conn.execute(f"UPDATE meeting_notes SET {', '.join(assignments)} WHERE id = ?", values)
+            row = conn.execute("SELECT * FROM meeting_notes WHERE id = ?", (note_id,)).fetchone()
+        return jsonify({"note": row_to_note(row)})
+
+    @app.delete("/api/notes/<int:note_id>")
+    def delete_note(note_id: int) -> Response:
+        with transaction() as conn:
+            existing = conn.execute("SELECT id FROM meeting_notes WHERE id = ?", (note_id,)).fetchone()
+            if existing is None:
+                abort(404, description="Meeting note not found.")
+            conn.execute("DELETE FROM meeting_notes WHERE id = ?", (note_id,))
+        return jsonify({"deleted": True, "noteId": note_id})
+
+    @app.get("/api/members")
+    def list_members() -> Response:
+        rows = db().execute(
+            "SELECT * FROM members ORDER BY name COLLATE NOCASE ASC, position COLLATE NOCASE ASC, id ASC"
+        ).fetchall()
+        return jsonify({"members": [row_to_member(row) for row in rows], "time": utc_now()})
+
+    @app.post("/api/members")
+    def create_member() -> tuple[Response, int]:
+        payload = require_json()
+        name = clean_text(payload.get("name"), 200)
+        if not name:
+            abort(400, description="Member name is required.")
+        now = utc_now()
+        with transaction() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO members (name, position, email, phone, notes, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    name,
+                    clean_text(payload.get("position"), 200),
+                    clean_text(payload.get("email"), 320),
+                    clean_text(payload.get("phone"), 80),
+                    clean_text(payload.get("notes"), 2000),
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute("SELECT * FROM members WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
+        return jsonify({"member": row_to_member(row)}), 201
+
+    @app.patch("/api/members/<int:member_id>")
+    def update_member(member_id: int) -> Response:
+        payload = require_json()
+        allowed_fields = {
+            "name": ("name", lambda value: clean_text(value, 200)),
+            "position": ("position", lambda value: clean_text(value, 200)),
+            "email": ("email", lambda value: clean_text(value, 320)),
+            "phone": ("phone", lambda value: clean_text(value, 80)),
+            "notes": ("notes", lambda value: clean_text(value, 2000)),
+        }
+        assignments: list[str] = []
+        values: list[Any] = []
+        for key, (column, cleaner) in allowed_fields.items():
+            if key in payload:
+                cleaned = cleaner(payload[key])
+                if key == "name" and not cleaned:
+                    abort(400, description="Member name cannot be blank.")
+                assignments.append(f"{column} = ?")
+                values.append(cleaned)
+        if not assignments:
+            abort(400, description="No editable member fields were provided.")
+        assignments.append("updated_at = ?")
+        values.append(utc_now())
+        values.append(member_id)
+        with transaction() as conn:
+            existing = conn.execute("SELECT * FROM members WHERE id = ?", (member_id,)).fetchone()
+            if existing is None:
+                abort(404, description="Member not found.")
+            conn.execute(f"UPDATE members SET {', '.join(assignments)} WHERE id = ?", values)
+            row = conn.execute("SELECT * FROM members WHERE id = ?", (member_id,)).fetchone()
+        return jsonify({"member": row_to_member(row)})
+
+    @app.delete("/api/members/<int:member_id>")
+    def delete_member(member_id: int) -> Response:
+        with transaction() as conn:
+            existing = conn.execute("SELECT id FROM members WHERE id = ?", (member_id,)).fetchone()
+            if existing is None:
+                abort(404, description="Member not found.")
+            conn.execute("DELETE FROM members WHERE id = ?", (member_id,))
+        return jsonify({"deleted": True, "memberId": member_id})
+
     @app.post("/api/backups")
     def create_backup() -> Response:
         backup_dir = get_backup_dir()
@@ -882,7 +1146,7 @@ def create_app() -> Flask:
         if not source.exists():
             abort(404, description="Database file does not exist yet.")
 
-        timestamp = dt.datetime.now(dt.UTC).strftime("%Y%m%d_%H%M%S")
+        timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d_%H%M%S")
         backup_path = backup_dir / f"pig_portal_{timestamp}.db"
         with app_write_lock():
             source_conn = db()
@@ -896,8 +1160,124 @@ def create_app() -> Flask:
 
     @app.get("/api/export")
     def export_json() -> Response:
-        payload = {"exportedAt": utc_now(), "projects": get_projects_with_steps(db())}
+        conn = db()
+        payload = {
+            "exportedAt": utc_now(),
+            "meeting": get_meeting_payload(conn),
+            "projects": get_projects_with_steps(conn),
+            "notes": [
+                row_to_note(row)
+                for row in conn.execute("SELECT * FROM meeting_notes ORDER BY note_date ASC, created_at ASC, id ASC").fetchall()
+            ],
+            "members": [
+                row_to_member(row)
+                for row in conn.execute("SELECT * FROM members ORDER BY name COLLATE NOCASE ASC, position COLLATE NOCASE ASC, id ASC").fetchall()
+            ],
+        }
         return jsonify(payload)
+
+    @app.get("/api/export/excel")
+    def export_excel() -> Response:
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment
+            from openpyxl.utils import get_column_letter
+        except ImportError as exc:
+            raise RuntimeError("openpyxl is required for Excel export. Run: pip install -r requirements.txt") from exc
+
+        conn = db()
+        exported_at = utc_now()
+        projects = get_projects_with_steps(conn)
+        meeting = get_meeting_payload(conn)
+        notes = [
+            row_to_note(row)
+            for row in conn.execute("SELECT * FROM meeting_notes ORDER BY note_date ASC, created_at ASC, id ASC").fetchall()
+        ]
+        members = [
+            row_to_member(row)
+            for row in conn.execute("SELECT * FROM members ORDER BY name COLLATE NOCASE ASC, position COLLATE NOCASE ASC, id ASC").fetchall()
+        ]
+
+        wb = Workbook()
+        wb.remove(wb.active)
+        header_fill = PatternFill("solid", fgColor="34495E")
+        header_font = Font(color="FFFFFF", bold=True)
+
+        def add_sheet(title: str, headers: list[str], rows: list[list[Any]]) -> None:
+            ws = wb.create_sheet(title[:31])
+            ws.append(headers)
+            for cell in ws[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center")
+            for row in rows:
+                ws.append(row)
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+            for column_cells in ws.columns:
+                max_length = 0
+                col_letter = get_column_letter(column_cells[0].column)
+                for cell in column_cells:
+                    value = "" if cell.value is None else str(cell.value)
+                    max_length = max(max_length, len(value))
+                ws.column_dimensions[col_letter].width = min(max(max_length + 2, 12), 60)
+            for row in ws.iter_rows(min_row=2):
+                for cell in row:
+                    cell.alignment = Alignment(vertical="top", wrap_text=True)
+
+        project_headers = [
+            "Project ID", "Project Name", "Project Status", "Assignee", "Start Date", "Total Time",
+            "Final ETIC", "Project Notes", "Project Created", "Project Updated", "Step #", "Step ID", "Issue",
+            "Tool / Action Item", "Step ETIC", "Step Status", "Step Notes", "Step Created", "Step Updated",
+        ]
+        for status in PROJECT_STATUS_ORDER:
+            rows: list[list[Any]] = []
+            for project in projects:
+                if project["status"] != status:
+                    continue
+                steps = project.get("steps") or []
+                if not steps:
+                    rows.append([
+                        project["id"], project["name"], project["status"], project["assignee"],
+                        project["startDate"], project["totalTime"], project["etic"], project.get("notes", ""),
+                        project["createdAt"], project["updatedAt"], "", "", "", "", "", "", "", "", "",
+                    ])
+                    continue
+                for step in steps:
+                    rows.append([
+                        project["id"], project["name"], project["status"], project["assignee"],
+                        project["startDate"], project["totalTime"], project["etic"], project.get("notes", ""),
+                        project["createdAt"], project["updatedAt"], step["position"], step["id"], step["issue"], step["tool"],
+                        step["etic"], step["status"], step.get("notes", ""), step["createdAt"], step["updatedAt"],
+                    ])
+            add_sheet(f"{status} Projects", project_headers, rows)
+
+        add_sheet(
+            "Meeting Notes",
+            ["Note ID", "Note Date", "Title", "Author", "Body", "Created", "Updated"],
+            [[n["id"], n["noteDate"], n["title"], n["author"], n["body"], n["createdAt"], n["updatedAt"]] for n in notes],
+        )
+        add_sheet(
+            "Members",
+            ["Member ID", "Name", "Position", "Email", "Phone", "Notes", "Created", "Updated"],
+            [[m["id"], m["name"], m["position"], m["email"], m["phone"], m["notes"], m["createdAt"], m["updatedAt"]] for m in members],
+        )
+        add_sheet(
+            "Next Meeting",
+            ["Field", "Value"],
+            [["Next Meeting Date/Time", meeting.get("meetingAt", "")], ["Location", meeting.get("location", "")], ["Exported At", exported_at]],
+        )
+
+        stream = BytesIO()
+        wb.save(stream)
+        stream.seek(0)
+        filename = f"pig_portal_export_{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d_%H%M%S')}.xlsx"
+        return send_file(
+            stream,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=filename,
+        )
 
     return app
 

@@ -2,11 +2,17 @@
 
 const API = {
   health: '/api/health',
+  meeting: '/api/meeting',
   projects: '/api/projects',
   project: (projectId) => `/api/projects/${encodeURIComponent(projectId)}`,
   projectSteps: (projectId) => `/api/projects/${encodeURIComponent(projectId)}/steps`,
   step: (stepId) => `/api/steps/${encodeURIComponent(stepId)}`,
+  notes: '/api/notes',
+  note: (noteId) => `/api/notes/${encodeURIComponent(noteId)}`,
+  members: '/api/members',
+  member: (memberId) => `/api/members/${encodeURIComponent(memberId)}`,
   backups: '/api/backups',
+  exportExcel: '/api/export/excel',
   lock: '/api/lock'
 };
 
@@ -14,6 +20,9 @@ const PROJECT_STATUS = ['Active', 'Inactive', 'Completed'];
 const STEP_STATUS = ['Not Started', 'In Work', 'C/W'];
 
 let projects = [];
+let notes = [];
+let members = [];
+let meeting = { meetingAt: '', location: '' };
 let currentProjectId = null;
 let dashboardFilter = 'All';
 
@@ -24,38 +33,31 @@ document.addEventListener('DOMContentLoaded', initApp);
 async function initApp() {
   cacheElements();
   wireEvents();
+  setDefaultDateInputs();
   await loadHealth();
+  await loadMeeting();
   await refreshProjects();
   showGlobalDashboard();
 }
 
 function cacheElements() {
-  elements.navTitle = document.getElementById('navTitle');
-  elements.homeBtn = document.getElementById('homeBtn');
-  elements.newProjectBtn = document.getElementById('newProjectBtn');
-  elements.projectDropdown = document.getElementById('projectDropdown');
-  elements.globalDashboard = document.getElementById('globalDashboard');
-  elements.mainContent = document.getElementById('mainContent');
-  elements.projectCardsContainer = document.getElementById('projectCardsContainer');
-  elements.deleteProjectBtn = document.getElementById('deleteProjectBtn');
-  elements.backupBtn = document.getElementById('backupBtn');
-  elements.refreshBtn = document.getElementById('refreshBtn');
-  elements.refreshProjectBtn = document.getElementById('refreshProjectBtn');
-  elements.lockStatus = document.getElementById('lockStatus');
-  elements.alertContainer = document.getElementById('alertContainer');
-  elements.serverStatus = document.getElementById('serverStatus');
-  elements.projNameTitle = document.getElementById('projNameTitle');
-  elements.projName = document.getElementById('projName');
-  elements.projStatus = document.getElementById('projStatus');
-  elements.projAssignee = document.getElementById('projAssignee');
-  elements.projStartDate = document.getElementById('projStartDate');
-  elements.projTotalTime = document.getElementById('projTotalTime');
-  elements.projEtic = document.getElementById('projEtic');
-  elements.searchInput = document.getElementById('searchInput');
-  elements.addStepBtn = document.getElementById('addStepBtn');
-  elements.tableBody = document.getElementById('tableBody');
-  elements.progressBar = document.getElementById('progressBar');
-  elements.progressText = document.getElementById('progressText');
+  const ids = [
+    'navTitle', 'homeBtn', 'notesTopBtn', 'membersTopBtn', 'newProjectBtn', 'exportExcelBtn',
+    'projectDropdown', 'globalDashboard', 'mainContent', 'notesPage', 'membersPage',
+    'projectCardsContainer', 'deleteProjectBtn', 'backupBtn', 'refreshBtn', 'refreshProjectBtn',
+    'lockStatus', 'alertContainer', 'serverStatus', 'projNameTitle', 'projName', 'projStatus',
+    'projAssignee', 'projStartDate', 'projTotalTime', 'projEtic', 'projNotes', 'searchInput', 'addStepBtn',
+    'tableBody', 'progressBar', 'progressText', 'meetingDisplay', 'meetingLocationDisplay',
+    'editMeetingBtn', 'meetingEditor', 'meetingAtInput', 'meetingLocationInput', 'saveMeetingBtn',
+    'cancelMeetingBtn', 'refreshNotesBtn', 'newNoteForm', 'noteDateInput', 'noteTitleInput',
+    'noteAuthorInput', 'noteBodyInput', 'clearNoteFormBtn', 'notesList', 'refreshMembersBtn',
+    'newMemberForm', 'memberNameInput', 'memberPositionInput', 'memberEmailInput',
+    'memberPhoneInput', 'memberNotesInput', 'clearMemberFormBtn', 'membersTableBody'
+  ];
+
+  ids.forEach((id) => {
+    elements[id] = document.getElementById(id);
+  });
 }
 
 function wireEvents() {
@@ -68,8 +70,11 @@ function wireEvents() {
   });
 
   elements.homeBtn.addEventListener('click', showGlobalDashboard);
+  elements.notesTopBtn.addEventListener('click', showNotesPage);
+  elements.membersTopBtn.addEventListener('click', showMembersPage);
   elements.newProjectBtn.addEventListener('click', createNewProject);
-  elements.projectDropdown.addEventListener('change', loadSelectedProject);
+  elements.exportExcelBtn.addEventListener('click', exportExcel);
+  elements.projectDropdown.addEventListener('change', loadSelectedNavigation);
   elements.deleteProjectBtn.addEventListener('click', deleteCurrentProject);
   elements.backupBtn.addEventListener('click', createBackup);
   elements.refreshBtn.addEventListener('click', async () => {
@@ -79,6 +84,26 @@ function wireEvents() {
   elements.refreshProjectBtn.addEventListener('click', refreshCurrentProjectFromDatabase);
   elements.addStepBtn.addEventListener('click', addStep);
   elements.searchInput.addEventListener('input', filterTable);
+
+  elements.editMeetingBtn.addEventListener('click', showMeetingEditor);
+  elements.cancelMeetingBtn.addEventListener('click', hideMeetingEditor);
+  elements.saveMeetingBtn.addEventListener('click', saveMeeting);
+
+  elements.refreshNotesBtn.addEventListener('click', async () => {
+    await refreshNotes();
+    showAlert('Notes refreshed from the shared database.', 'success');
+  });
+  elements.newNoteForm.addEventListener('submit', createNote);
+  elements.clearNoteFormBtn.addEventListener('click', clearNoteForm);
+  elements.notesList.addEventListener('click', handleNoteListClick);
+
+  elements.refreshMembersBtn.addEventListener('click', async () => {
+    await refreshMembers();
+    showAlert('Members refreshed from the shared database.', 'success');
+  });
+  elements.newMemberForm.addEventListener('submit', createMember);
+  elements.clearMemberFormBtn.addEventListener('click', clearMemberForm);
+  elements.membersTableBody.addEventListener('click', handleMemberTableClick);
 
   document.querySelectorAll('.filter-btn').forEach((button) => {
     button.addEventListener('click', () => setDashboardFilter(button.dataset.filter));
@@ -90,13 +115,20 @@ function wireEvents() {
     elements.projAssignee,
     elements.projStartDate,
     elements.projTotalTime,
-    elements.projEtic
+    elements.projEtic,
+    elements.projNotes
   ].forEach((input) => input.addEventListener('change', saveCurrentProject));
 
   elements.tableBody.addEventListener('blur', async (event) => {
     const cell = event.target.closest('[contenteditable="true"]');
     if (cell) {
       await saveStepFromRow(cell.closest('tr'));
+      return;
+    }
+
+    const stepNotes = event.target.closest('textarea[data-step-notes]');
+    if (stepNotes) {
+      await saveStepFromRow(stepNotes.closest('tr'));
     }
   }, true);
 
@@ -122,59 +154,10 @@ function wireEvents() {
   });
 }
 
-async function loadHealth() {
-  try {
-    const data = await apiFetch(API.health);
-    elements.serverStatus.textContent = `Connected. Database: ${data.database}`;
-    elements.lockStatus.textContent = data.lock?.locked ? `Write lock active: ${data.lock.owner}` : 'Write lock: available';
-  } catch (error) {
-    elements.serverStatus.textContent = 'Unable to reach the Python server.';
-    showAlert(error.message, 'error');
-  }
-}
-
-async function refreshProjects() {
-  const previousProjectId = currentProjectId;
-  const data = await apiFetch(API.projects);
-  projects = Array.isArray(data.projects) ? data.projects : [];
-  updateDropdown();
-  renderDashboardCards();
-  await refreshLockStatus();
-
-  if (previousProjectId && !elements.mainContent.hidden) {
-    const refreshedProject = getProjectById(previousProjectId);
-    if (refreshedProject) {
-      currentProjectId = refreshedProject.id;
-      elements.projectDropdown.value = String(refreshedProject.id);
-      renderProject(refreshedProject);
-    } else {
-      showGlobalDashboard();
-      showAlert('The project you were viewing no longer exists in the shared database.', 'error');
-    }
-  }
-}
-
-async function refreshLockStatus() {
-  try {
-    const data = await apiFetch(API.lock);
-    elements.lockStatus.textContent = data.locked ? `Write lock active: ${data.owner}` : 'Write lock: available';
-  } catch {
-    elements.lockStatus.textContent = 'Write lock status unavailable.';
-  }
-}
-
-async function refreshCurrentProjectFromDatabase() {
-  if (!currentProjectId) {
-    return;
-  }
-  await refreshProjects();
-  showAlert('Project refreshed from the shared database.', 'success');
-}
-
 async function apiFetch(url, options = {}) {
   const requestOptions = {
     headers: {
-      'Accept': 'application/json',
+      Accept: 'application/json',
       ...(options.body ? { 'Content-Type': 'application/json' } : {})
     },
     ...options
@@ -194,7 +177,6 @@ async function apiFetch(url, options = {}) {
 
 function showAlert(message, type = 'info') {
   elements.alertContainer.replaceChildren();
-
   if (!message) {
     return;
   }
@@ -211,6 +193,198 @@ function showAlert(message, type = 'info') {
       }
     }, 4500);
   }
+}
+
+async function loadHealth() {
+  try {
+    const data = await apiFetch(API.health);
+    elements.serverStatus.textContent = `Connected. Database: ${data.database}`;
+    elements.lockStatus.textContent = data.lock?.locked ? `Write lock active: ${data.lock.owner}` : 'Write lock: available';
+  } catch (error) {
+    elements.serverStatus.textContent = 'Unable to reach the Python server.';
+    showAlert(error.message, 'error');
+  }
+}
+
+async function refreshLockStatus() {
+  try {
+    const data = await apiFetch(API.lock);
+    elements.lockStatus.textContent = data.locked ? `Write lock active: ${data.owner}` : 'Write lock: available';
+  } catch {
+    elements.lockStatus.textContent = 'Write lock status unavailable.';
+  }
+}
+
+function setDefaultDateInputs() {
+  const now = localDateTimeValue(new Date());
+  elements.noteDateInput.value = now;
+}
+
+function localDateTimeValue(date) {
+  const offsetMs = date.getTimezoneOffset() * 60 * 1000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
+function displayDateTime(value) {
+  if (!value) {
+    return 'Not set';
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+async function loadMeeting() {
+  try {
+    const data = await apiFetch(API.meeting);
+    meeting = data.meeting || { meetingAt: '', location: '' };
+    renderMeetingBanner();
+  } catch (error) {
+    showAlert(error.message, 'error');
+  }
+}
+
+function renderMeetingBanner() {
+  elements.meetingDisplay.textContent = displayDateTime(meeting.meetingAt);
+  elements.meetingLocationDisplay.textContent = meeting.location || 'Not set';
+  elements.meetingAtInput.value = meeting.meetingAt || '';
+  elements.meetingLocationInput.value = meeting.location || '';
+}
+
+function showMeetingEditor() {
+  renderMeetingBanner();
+  elements.meetingEditor.hidden = false;
+  elements.meetingAtInput.focus();
+}
+
+function hideMeetingEditor() {
+  elements.meetingEditor.hidden = true;
+}
+
+async function saveMeeting() {
+  const payload = {
+    meetingAt: elements.meetingAtInput.value,
+    location: elements.meetingLocationInput.value
+  };
+
+  try {
+    const data = await apiFetch(API.meeting, {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    });
+    meeting = data.meeting;
+    renderMeetingBanner();
+    hideMeetingEditor();
+    showAlert('Next meeting saved.', 'success');
+  } catch (error) {
+    showAlert(error.message, 'error');
+  }
+}
+
+function hideAllPages() {
+  elements.globalDashboard.hidden = true;
+  elements.mainContent.hidden = true;
+  elements.notesPage.hidden = true;
+  elements.membersPage.hidden = true;
+}
+
+function showGlobalDashboard() {
+  hideAllPages();
+  elements.globalDashboard.hidden = false;
+  currentProjectId = null;
+  elements.projectDropdown.value = '__home__';
+  renderDashboardCards();
+}
+
+async function showNotesPage() {
+  hideAllPages();
+  elements.notesPage.hidden = false;
+  currentProjectId = null;
+  elements.projectDropdown.value = '__notes__';
+  await refreshNotes();
+}
+
+async function showMembersPage() {
+  hideAllPages();
+  elements.membersPage.hidden = false;
+  currentProjectId = null;
+  elements.projectDropdown.value = '__members__';
+  await refreshMembers();
+}
+
+function loadSelectedNavigation() {
+  const selected = elements.projectDropdown.value;
+  if (selected === '__home__') {
+    showGlobalDashboard();
+  } else if (selected === '__notes__') {
+    showNotesPage();
+  } else if (selected === '__members__') {
+    showMembersPage();
+  } else if (selected.startsWith('project:')) {
+    openProject(selected.slice('project:'.length));
+  }
+}
+
+async function refreshProjects() {
+  const previousProjectId = currentProjectId;
+  const data = await apiFetch(API.projects);
+  projects = Array.isArray(data.projects) ? data.projects : [];
+  updateDropdown();
+  renderDashboardCards();
+  await refreshLockStatus();
+
+  if (previousProjectId && !elements.mainContent.hidden) {
+    const refreshedProject = getProjectById(previousProjectId);
+    if (refreshedProject) {
+      currentProjectId = refreshedProject.id;
+      elements.projectDropdown.value = `project:${refreshedProject.id}`;
+      renderProject(refreshedProject);
+    } else {
+      showGlobalDashboard();
+      showAlert('The project you were viewing no longer exists in the shared database.', 'error');
+    }
+  }
+}
+
+function updateDropdown() {
+  elements.projectDropdown.replaceChildren();
+
+  const defaultOption = document.createElement('option');
+  defaultOption.value = '';
+  defaultOption.disabled = true;
+  defaultOption.textContent = '-- Navigate --';
+  elements.projectDropdown.appendChild(defaultOption);
+
+  const pagesGroup = document.createElement('optgroup');
+  pagesGroup.label = 'Pages';
+  pagesGroup.append(createOption('__home__', 'Home Dashboard'));
+  pagesGroup.append(createOption('__notes__', 'Meeting Notes / Journal'));
+  pagesGroup.append(createOption('__members__', 'Members / Info'));
+  elements.projectDropdown.appendChild(pagesGroup);
+
+  const projectsGroup = document.createElement('optgroup');
+  projectsGroup.label = 'Projects';
+  projects.forEach((project) => {
+    projectsGroup.append(createOption(`project:${project.id}`, project.name));
+  });
+  elements.projectDropdown.appendChild(projectsGroup);
+}
+
+function createOption(value, text) {
+  const option = document.createElement('option');
+  option.value = value;
+  option.textContent = text;
+  return option;
+}
+
+async function refreshCurrentProjectFromDatabase() {
+  if (!currentProjectId) {
+    return;
+  }
+  await refreshProjects();
+  showAlert('Project refreshed from the shared database.', 'success');
 }
 
 function getProjectById(projectId) {
@@ -230,14 +404,6 @@ function setDashboardFilter(filterType) {
     activeButton.classList.add('active');
   }
 
-  renderDashboardCards();
-}
-
-function showGlobalDashboard() {
-  elements.mainContent.hidden = true;
-  elements.globalDashboard.hidden = false;
-  elements.projectDropdown.value = '';
-  currentProjectId = null;
   renderDashboardCards();
 }
 
@@ -319,31 +485,6 @@ function calculateStats(stepsArray) {
   return { total, completed, perc };
 }
 
-function updateDropdown() {
-  elements.projectDropdown.replaceChildren();
-
-  const defaultOption = document.createElement('option');
-  defaultOption.value = '';
-  defaultOption.disabled = true;
-  defaultOption.selected = true;
-  defaultOption.textContent = '-- Jump to Project --';
-  elements.projectDropdown.appendChild(defaultOption);
-
-  projects.forEach((project) => {
-    const option = document.createElement('option');
-    option.value = String(project.id);
-    option.textContent = project.name;
-    elements.projectDropdown.appendChild(option);
-  });
-}
-
-function loadSelectedProject() {
-  const selected = elements.projectDropdown.value;
-  if (selected) {
-    openProject(selected);
-  }
-}
-
 function openProject(projectId) {
   const project = getProjectById(projectId);
   if (!project) {
@@ -352,9 +493,9 @@ function openProject(projectId) {
     return;
   }
 
+  hideAllPages();
   currentProjectId = project.id;
-  elements.projectDropdown.value = String(project.id);
-  elements.globalDashboard.hidden = true;
+  elements.projectDropdown.value = `project:${project.id}`;
   elements.mainContent.hidden = false;
   renderProject(project);
 }
@@ -367,6 +508,7 @@ function renderProject(project) {
   elements.projStartDate.value = project.startDate || '';
   elements.projTotalTime.value = project.totalTime || '';
   elements.projEtic.value = project.etic || '';
+  elements.projNotes.value = project.notes || '';
 
   elements.tableBody.replaceChildren();
 
@@ -402,6 +544,16 @@ function createStepRow(step, index) {
   });
   statusCell.appendChild(statusSelect);
 
+  const notesCell = document.createElement('td');
+  const notesTextarea = document.createElement('textarea');
+  notesTextarea.className = 'step-notes-textarea';
+  notesTextarea.dataset.stepNotes = 'true';
+  notesTextarea.rows = 3;
+  notesTextarea.maxLength = 10000;
+  notesTextarea.value = step.notes || '';
+  notesTextarea.placeholder = 'Step notes, blockers, decisions, or follow-up...';
+  notesCell.appendChild(notesTextarea);
+
   const actions = document.createElement('td');
   const deleteButton = document.createElement('button');
   deleteButton.className = 'btn btn-danger';
@@ -410,7 +562,7 @@ function createStepRow(step, index) {
   deleteButton.textContent = 'Delete';
   actions.appendChild(deleteButton);
 
-  row.append(stepNumber, issue, tool, etic, statusCell, actions);
+  row.append(stepNumber, issue, tool, etic, statusCell, notesCell, actions);
   return row;
 }
 
@@ -435,7 +587,8 @@ async function saveCurrentProject() {
     assignee: elements.projAssignee.value,
     startDate: elements.projStartDate.value,
     totalTime: elements.projTotalTime.value,
-    etic: elements.projEtic.value
+    etic: elements.projEtic.value,
+    notes: elements.projNotes.value
   };
 
   if (!payload.name.trim()) {
@@ -453,7 +606,7 @@ async function saveCurrentProject() {
     currentProjectId = data.project.id;
     elements.projNameTitle.textContent = data.project.name;
     updateDropdown();
-    elements.projectDropdown.value = String(data.project.id);
+    elements.projectDropdown.value = `project:${data.project.id}`;
     renderDashboardCards();
   } catch (error) {
     showAlert(error.message, 'error');
@@ -574,7 +727,8 @@ async function saveStepFromRow(row) {
     issue: getCellText(row, 'issue'),
     tool: getCellText(row, 'tool'),
     etic: getCellText(row, 'etic'),
-    status: row.querySelector('select[data-step-status]')?.value || 'Not Started'
+    status: row.querySelector('select[data-step-status]')?.value || 'Not Started',
+    notes: row.querySelector('textarea[data-step-notes]')?.value.trim() || ''
   };
 
   try {
@@ -634,8 +788,405 @@ function calculateProgress() {
 function filterTable() {
   const filter = elements.searchInput.value.toUpperCase();
   Array.from(elements.tableBody.rows).forEach((row) => {
-    row.style.display = row.textContent.toUpperCase().includes(filter) ? '' : 'none';
+    const fieldValues = Array.from(row.querySelectorAll('input, textarea, select'))
+      .map((field) => field.value || '')
+      .join(' ');
+    const haystack = `${row.textContent} ${fieldValues}`.toUpperCase();
+    row.style.display = haystack.includes(filter) ? '' : 'none';
   });
+}
+
+async function refreshNotes() {
+  try {
+    const data = await apiFetch(API.notes);
+    notes = Array.isArray(data.notes) ? data.notes : [];
+    notes.sort((a, b) => String(a.noteDate).localeCompare(String(b.noteDate)) || Number(a.id) - Number(b.id));
+    renderNotes();
+  } catch (error) {
+    showAlert(error.message, 'error');
+  }
+}
+
+function renderNotes() {
+  elements.notesList.replaceChildren();
+  if (notes.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = 'No meeting notes have been added yet.';
+    elements.notesList.appendChild(empty);
+    return;
+  }
+
+  notes.forEach((note) => {
+    const card = document.createElement('article');
+    card.className = 'journal-card';
+    card.dataset.noteId = String(note.id);
+
+    const header = document.createElement('div');
+    header.className = 'journal-card-header';
+
+    const dateLabel = document.createElement('div');
+    dateLabel.className = 'journal-date';
+    dateLabel.textContent = displayDateTime(note.noteDate);
+
+    const actions = document.createElement('div');
+    actions.className = 'row-actions';
+
+    const saveButton = document.createElement('button');
+    saveButton.type = 'button';
+    saveButton.className = 'btn btn-success';
+    saveButton.dataset.saveNote = 'true';
+    saveButton.textContent = 'Save';
+
+    const deleteButton = document.createElement('button');
+    deleteButton.type = 'button';
+    deleteButton.className = 'btn btn-danger';
+    deleteButton.dataset.deleteNote = 'true';
+    deleteButton.textContent = 'Delete';
+
+    actions.append(saveButton, deleteButton);
+    header.append(dateLabel, actions);
+
+    const grid = document.createElement('div');
+    grid.className = 'form-grid compact-grid';
+
+    grid.append(
+      labeledInput('Date/Time', 'datetime-local', 'noteDate', note.noteDate || ''),
+      labeledInput('Title', 'text', 'title', note.title || '', 200),
+      labeledInput('Author', 'text', 'author', note.author || '', 200),
+      labeledTextarea('Note', 'body', note.body || '', 5, 10000, true)
+    );
+
+    card.append(header, grid);
+    elements.notesList.appendChild(card);
+  });
+}
+
+function labeledInput(labelText, type, field, value, maxLength = null) {
+  const label = document.createElement('label');
+  label.textContent = labelText;
+  const input = document.createElement('input');
+  input.type = type;
+  input.dataset.field = field;
+  input.value = value;
+  if (maxLength) {
+    input.maxLength = maxLength;
+  }
+  label.appendChild(input);
+  return label;
+}
+
+function labeledTextarea(labelText, field, value, rows = 4, maxLength = null, spanAll = false) {
+  const label = document.createElement('label');
+  label.textContent = labelText;
+  if (spanAll) {
+    label.className = 'span-all';
+  }
+  const textarea = document.createElement('textarea');
+  textarea.dataset.field = field;
+  textarea.rows = rows;
+  textarea.value = value;
+  if (maxLength) {
+    textarea.maxLength = maxLength;
+  }
+  label.appendChild(textarea);
+  return label;
+}
+
+async function createNote(event) {
+  event.preventDefault();
+  const payload = {
+    noteDate: elements.noteDateInput.value || localDateTimeValue(new Date()),
+    title: elements.noteTitleInput.value,
+    author: elements.noteAuthorInput.value,
+    body: elements.noteBodyInput.value
+  };
+
+  if (!payload.body.trim() && !payload.title.trim()) {
+    showAlert('Add a title or note before saving.', 'error');
+    return;
+  }
+
+  try {
+    const data = await apiFetch(API.notes, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    notes.push(data.note);
+    notes.sort((a, b) => String(a.noteDate).localeCompare(String(b.noteDate)) || Number(a.id) - Number(b.id));
+    renderNotes();
+    clearNoteForm();
+    showAlert('Note added.', 'success');
+  } catch (error) {
+    showAlert(error.message, 'error');
+  }
+}
+
+function clearNoteForm() {
+  elements.noteDateInput.value = localDateTimeValue(new Date());
+  elements.noteTitleInput.value = '';
+  elements.noteAuthorInput.value = '';
+  elements.noteBodyInput.value = '';
+}
+
+async function handleNoteListClick(event) {
+  const saveButton = event.target.closest('button[data-save-note]');
+  const deleteButton = event.target.closest('button[data-delete-note]');
+  if (saveButton) {
+    await saveNoteCard(saveButton.closest('.journal-card'));
+  } else if (deleteButton) {
+    await deleteNoteCard(deleteButton.closest('.journal-card'));
+  }
+}
+
+async function saveNoteCard(card) {
+  const noteId = card?.dataset.noteId;
+  if (!noteId) {
+    return;
+  }
+
+  const payload = {
+    noteDate: getCardField(card, 'noteDate') || localDateTimeValue(new Date()),
+    title: getCardField(card, 'title'),
+    author: getCardField(card, 'author'),
+    body: getCardField(card, 'body')
+  };
+
+  try {
+    const data = await apiFetch(API.note(noteId), {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    });
+    const index = notes.findIndex((note) => String(note.id) === String(noteId));
+    if (index >= 0) {
+      notes[index] = data.note;
+    }
+    notes.sort((a, b) => String(a.noteDate).localeCompare(String(b.noteDate)) || Number(a.id) - Number(b.id));
+    renderNotes();
+    showAlert('Note saved.', 'success');
+  } catch (error) {
+    showAlert(error.message, 'error');
+  }
+}
+
+async function deleteNoteCard(card) {
+  const noteId = card?.dataset.noteId;
+  if (!noteId) {
+    return;
+  }
+  if (!window.confirm('Delete this note?')) {
+    return;
+  }
+
+  try {
+    await apiFetch(API.note(noteId), { method: 'DELETE' });
+    notes = notes.filter((note) => String(note.id) !== String(noteId));
+    renderNotes();
+    showAlert('Note deleted.', 'success');
+  } catch (error) {
+    showAlert(error.message, 'error');
+  }
+}
+
+function getCardField(card, field) {
+  const input = card.querySelector(`[data-field="${field}"]`);
+  return input ? input.value.trim() : '';
+}
+
+async function refreshMembers() {
+  try {
+    const data = await apiFetch(API.members);
+    members = Array.isArray(data.members) ? data.members : [];
+    renderMembers();
+  } catch (error) {
+    showAlert(error.message, 'error');
+  }
+}
+
+function renderMembers() {
+  elements.membersTableBody.replaceChildren();
+  if (members.length === 0) {
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = 6;
+    cell.className = 'empty-table-cell';
+    cell.textContent = 'No members have been added yet.';
+    row.appendChild(cell);
+    elements.membersTableBody.appendChild(row);
+    return;
+  }
+
+  members.forEach((member) => {
+    const row = document.createElement('tr');
+    row.dataset.memberId = String(member.id);
+
+    row.append(
+      tableInputCell('name', member.name || '', 'text', 200),
+      tableInputCell('position', member.position || '', 'text', 200),
+      tableInputCell('email', member.email || '', 'email', 320),
+      tableInputCell('phone', member.phone || '', 'text', 80),
+      tableTextareaCell('notes', member.notes || '', 2000),
+      memberActionCell()
+    );
+
+    elements.membersTableBody.appendChild(row);
+  });
+}
+
+function tableInputCell(field, value, type = 'text', maxLength = null) {
+  const cell = document.createElement('td');
+  const input = document.createElement('input');
+  input.type = type;
+  input.dataset.field = field;
+  input.value = value;
+  if (maxLength) {
+    input.maxLength = maxLength;
+  }
+  cell.appendChild(input);
+  return cell;
+}
+
+function tableTextareaCell(field, value, maxLength = null) {
+  const cell = document.createElement('td');
+  const textarea = document.createElement('textarea');
+  textarea.dataset.field = field;
+  textarea.rows = 2;
+  textarea.value = value;
+  if (maxLength) {
+    textarea.maxLength = maxLength;
+  }
+  cell.appendChild(textarea);
+  return cell;
+}
+
+function memberActionCell() {
+  const cell = document.createElement('td');
+  const wrapper = document.createElement('div');
+  wrapper.className = 'row-actions vertical-actions';
+
+  const saveButton = document.createElement('button');
+  saveButton.type = 'button';
+  saveButton.className = 'btn btn-success';
+  saveButton.dataset.saveMember = 'true';
+  saveButton.textContent = 'Save';
+
+  const deleteButton = document.createElement('button');
+  deleteButton.type = 'button';
+  deleteButton.className = 'btn btn-danger';
+  deleteButton.dataset.deleteMember = 'true';
+  deleteButton.textContent = 'Delete';
+
+  wrapper.append(saveButton, deleteButton);
+  cell.appendChild(wrapper);
+  return cell;
+}
+
+async function createMember(event) {
+  event.preventDefault();
+  const payload = {
+    name: elements.memberNameInput.value,
+    position: elements.memberPositionInput.value,
+    email: elements.memberEmailInput.value,
+    phone: elements.memberPhoneInput.value,
+    notes: elements.memberNotesInput.value
+  };
+
+  if (!payload.name.trim()) {
+    showAlert('Member name is required.', 'error');
+    return;
+  }
+
+  try {
+    const data = await apiFetch(API.members, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    members.push(data.member);
+    members.sort((a, b) => a.name.localeCompare(b.name));
+    renderMembers();
+    clearMemberForm();
+    showAlert('Member added.', 'success');
+  } catch (error) {
+    showAlert(error.message, 'error');
+  }
+}
+
+function clearMemberForm() {
+  elements.memberNameInput.value = '';
+  elements.memberPositionInput.value = '';
+  elements.memberEmailInput.value = '';
+  elements.memberPhoneInput.value = '';
+  elements.memberNotesInput.value = '';
+}
+
+async function handleMemberTableClick(event) {
+  const saveButton = event.target.closest('button[data-save-member]');
+  const deleteButton = event.target.closest('button[data-delete-member]');
+  if (saveButton) {
+    await saveMemberRow(saveButton.closest('tr'));
+  } else if (deleteButton) {
+    await deleteMemberRow(deleteButton.closest('tr'));
+  }
+}
+
+async function saveMemberRow(row) {
+  const memberId = row?.dataset.memberId;
+  if (!memberId) {
+    return;
+  }
+
+  const payload = {
+    name: getRowField(row, 'name'),
+    position: getRowField(row, 'position'),
+    email: getRowField(row, 'email'),
+    phone: getRowField(row, 'phone'),
+    notes: getRowField(row, 'notes')
+  };
+
+  if (!payload.name.trim()) {
+    showAlert('Member name cannot be blank.', 'error');
+    return;
+  }
+
+  try {
+    const data = await apiFetch(API.member(memberId), {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    });
+    const index = members.findIndex((member) => String(member.id) === String(memberId));
+    if (index >= 0) {
+      members[index] = data.member;
+    }
+    members.sort((a, b) => a.name.localeCompare(b.name));
+    renderMembers();
+    showAlert('Member saved.', 'success');
+  } catch (error) {
+    showAlert(error.message, 'error');
+  }
+}
+
+async function deleteMemberRow(row) {
+  const memberId = row?.dataset.memberId;
+  if (!memberId) {
+    return;
+  }
+  if (!window.confirm('Delete this member?')) {
+    return;
+  }
+
+  try {
+    await apiFetch(API.member(memberId), { method: 'DELETE' });
+    members = members.filter((member) => String(member.id) !== String(memberId));
+    renderMembers();
+    showAlert('Member deleted.', 'success');
+  } catch (error) {
+    showAlert(error.message, 'error');
+  }
+}
+
+function getRowField(row, field) {
+  const input = row.querySelector(`[data-field="${field}"]`);
+  return input ? input.value.trim() : '';
 }
 
 async function createBackup() {
@@ -645,4 +1196,13 @@ async function createBackup() {
   } catch (error) {
     showAlert(error.message, 'error');
   }
+}
+
+function exportExcel() {
+  const link = document.createElement('a');
+  link.href = API.exportExcel;
+  link.download = '';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
 }
