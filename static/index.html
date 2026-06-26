@@ -78,8 +78,12 @@
 
     <section class="container page" id="mainContent" hidden>
       <div class="project-info">
-        <button class="btn btn-danger delete-project-btn" id="deleteProjectBtn" type="button">Delete Project</button>
+        <div class="project-top-actions">
+          <button class="btn btn-secondary" id="pinProjectBtn" type="button" aria-pressed="false">Pin Project</button>
+          <button class="btn btn-danger" id="deleteProjectBtn" type="button">Delete Project</button>
+        </div>
         <h2 id="projNameTitle">Loading...</h2>
+        <p class="pin-status" id="projPinStatus" hidden>📌 Pinned project</p>
         <p>
           <strong>Project Name:</strong>
           <input type="text" id="projName" class="editable-input" autocomplete="off" maxlength="150">
@@ -140,7 +144,7 @@
       <div class="page-header">
         <div>
           <h2>Meeting Notes / Journal</h2>
-          <p class="muted">Notes are stored in the shared database and shown in chronological order.</p>
+          <p class="muted">Notes are stored in the shared database and shown newest first.</p>
         </div>
         <div class="header-actions">
           <button class="btn btn-secondary" id="refreshNotesBtn" type="button">Refresh Notes</button>

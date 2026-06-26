@@ -151,8 +151,8 @@ Click **Export Excel** from the meeting/banner bar. The browser will download an
 Worksheets included:
 
 - `Active Projects`
-- `Completed Projects`
 - `Inactive Projects`
+- `Completed Projects`
 - `Meeting Notes`
 - `Members`
 - `Next Meeting`
@@ -190,3 +190,10 @@ Use **Create DB Backup** from the meeting/banner bar. Backups are SQLite `.db` s
 - Do not use SQLite WAL mode on this design.
 - Browser download behavior controls whether Excel export prompts for a save location or saves directly to Downloads.
 - If this becomes mission-critical or heavily used, move to a real server or SharePoint Lists/Graph.
+
+
+## Latest updates
+
+- Meeting notes / journal entries now display newest to oldest.
+- Projects can be pinned from the project page. Pinned projects sort above unpinned projects on the dashboard and in the navigation dropdown.
+- Existing databases migrate automatically by adding a `projects.pinned` column when the app starts.

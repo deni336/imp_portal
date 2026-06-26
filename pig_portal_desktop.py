@@ -439,6 +439,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             total_time TEXT NOT NULL DEFAULT '',
             etic TEXT NOT NULL DEFAULT '',
             notes TEXT NOT NULL DEFAULT '',
+            pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -496,6 +497,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
         """
     )
     ensure_column(conn, "projects", "notes", "TEXT NOT NULL DEFAULT ''")
+    ensure_column(conn, "projects", "pinned", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(conn, "steps", "notes", "TEXT NOT NULL DEFAULT ''")
 
 
@@ -515,8 +517,8 @@ def seed_defaults_if_empty(conn: sqlite3.Connection) -> None:
         cursor = conn.execute(
             """
             INSERT INTO projects
-                (name, status, assignee, start_date, total_time, etic, notes, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (name, status, assignee, start_date, total_time, etic, notes, pinned, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
@@ -526,6 +528,7 @@ def seed_defaults_if_empty(conn: sqlite3.Connection) -> None:
                 clean_text(project.get("totalTime"), 100),
                 clean_text(project.get("etic"), 100),
                 clean_text(project.get("notes"), 10000),
+                0,
                 now,
                 now,
             ),
@@ -576,6 +579,7 @@ def row_to_project(row: sqlite3.Row, steps: list[dict[str, Any]] | None = None) 
         "totalTime": row["total_time"],
         "etic": row["etic"],
         "notes": row["notes"],
+        "pinned": bool(row["pinned"]),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
         "steps": steps or [],
@@ -653,7 +657,7 @@ def get_meeting_payload(conn: sqlite3.Connection) -> dict[str, str]:
 
 
 def get_projects_with_steps(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    project_rows = conn.execute("SELECT * FROM projects ORDER BY name COLLATE NOCASE").fetchall()
+    project_rows = conn.execute("SELECT * FROM projects ORDER BY pinned DESC, name COLLATE NOCASE").fetchall()
     step_rows = conn.execute("SELECT * FROM steps ORDER BY project_id, position, id").fetchall()
 
     steps_by_project: dict[int, list[dict[str, Any]]] = {}
@@ -832,8 +836,8 @@ def create_app() -> Flask:
             cursor = conn.execute(
                 """
                 INSERT INTO projects
-                    (name, status, assignee, start_date, total_time, etic, notes, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (name, status, assignee, start_date, total_time, etic, notes, pinned, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     name,
@@ -843,6 +847,7 @@ def create_app() -> Flask:
                     clean_text(payload.get("totalTime"), 100),
                     clean_text(payload.get("etic"), 100),
                     clean_text(payload.get("notes"), 10000),
+                    1 if bool(payload.get("pinned")) else 0,
                     now,
                     now,
                 ),
@@ -862,6 +867,7 @@ def create_app() -> Flask:
             "totalTime": ("total_time", lambda value: clean_text(value, 100)),
             "etic": ("etic", lambda value: clean_text(value, 100)),
             "notes": ("notes", lambda value: clean_text(value, 10000)),
+            "pinned": ("pinned", lambda value: 1 if bool(value) else 0),
         }
 
         assignments: list[str] = []
@@ -1000,7 +1006,7 @@ def create_app() -> Flask:
     @app.get("/api/notes")
     def list_notes() -> Response:
         rows = db().execute(
-            "SELECT * FROM meeting_notes ORDER BY note_date ASC, created_at ASC, id ASC"
+            "SELECT * FROM meeting_notes ORDER BY note_date DESC, created_at DESC, id DESC"
         ).fetchall()
         return jsonify({"notes": [row_to_note(row) for row in rows], "time": utc_now()})
 
@@ -1167,7 +1173,7 @@ def create_app() -> Flask:
             "projects": get_projects_with_steps(conn),
             "notes": [
                 row_to_note(row)
-                for row in conn.execute("SELECT * FROM meeting_notes ORDER BY note_date ASC, created_at ASC, id ASC").fetchall()
+                for row in conn.execute("SELECT * FROM meeting_notes ORDER BY note_date DESC, created_at DESC, id DESC").fetchall()
             ],
             "members": [
                 row_to_member(row)
@@ -1191,7 +1197,7 @@ def create_app() -> Flask:
         meeting = get_meeting_payload(conn)
         notes = [
             row_to_note(row)
-            for row in conn.execute("SELECT * FROM meeting_notes ORDER BY note_date ASC, created_at ASC, id ASC").fetchall()
+            for row in conn.execute("SELECT * FROM meeting_notes ORDER BY note_date DESC, created_at DESC, id DESC").fetchall()
         ]
         members = [
             row_to_member(row)
@@ -1226,7 +1232,7 @@ def create_app() -> Flask:
                     cell.alignment = Alignment(vertical="top", wrap_text=True)
 
         project_headers = [
-            "Project ID", "Project Name", "Project Status", "Assignee", "Start Date", "Total Time",
+            "Project ID", "Project Name", "Project Status", "Pinned", "Assignee", "Start Date", "Total Time",
             "Final ETIC", "Project Notes", "Project Created", "Project Updated", "Step #", "Step ID", "Issue",
             "Tool / Action Item", "Step ETIC", "Step Status", "Step Notes", "Step Created", "Step Updated",
         ]
@@ -1238,14 +1244,14 @@ def create_app() -> Flask:
                 steps = project.get("steps") or []
                 if not steps:
                     rows.append([
-                        project["id"], project["name"], project["status"], project["assignee"],
+                        project["id"], project["name"], project["status"], "Yes" if project.get("pinned") else "No", project["assignee"],
                         project["startDate"], project["totalTime"], project["etic"], project.get("notes", ""),
                         project["createdAt"], project["updatedAt"], "", "", "", "", "", "", "", "", "",
                     ])
                     continue
                 for step in steps:
                     rows.append([
-                        project["id"], project["name"], project["status"], project["assignee"],
+                        project["id"], project["name"], project["status"], "Yes" if project.get("pinned") else "No", project["assignee"],
                         project["startDate"], project["totalTime"], project["etic"], project.get("notes", ""),
                         project["createdAt"], project["updatedAt"], step["position"], step["id"], step["issue"], step["tool"],
                         step["etic"], step["status"], step.get("notes", ""), step["createdAt"], step["updatedAt"],

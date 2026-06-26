@@ -44,7 +44,7 @@ function cacheElements() {
   const ids = [
     'navTitle', 'homeBtn', 'notesTopBtn', 'membersTopBtn', 'newProjectBtn', 'exportExcelBtn',
     'projectDropdown', 'globalDashboard', 'mainContent', 'notesPage', 'membersPage',
-    'projectCardsContainer', 'deleteProjectBtn', 'backupBtn', 'refreshBtn', 'refreshProjectBtn',
+    'projectCardsContainer', 'deleteProjectBtn', 'pinProjectBtn', 'projPinStatus', 'backupBtn', 'refreshBtn', 'refreshProjectBtn',
     'lockStatus', 'alertContainer', 'serverStatus', 'projNameTitle', 'projName', 'projStatus',
     'projAssignee', 'projStartDate', 'projTotalTime', 'projEtic', 'projNotes', 'searchInput', 'addStepBtn',
     'tableBody', 'progressBar', 'progressText', 'meetingDisplay', 'meetingLocationDisplay',
@@ -76,6 +76,7 @@ function wireEvents() {
   elements.exportExcelBtn.addEventListener('click', exportExcel);
   elements.projectDropdown.addEventListener('change', loadSelectedNavigation);
   elements.deleteProjectBtn.addEventListener('click', deleteCurrentProject);
+  elements.pinProjectBtn.addEventListener('click', toggleCurrentProjectPinned);
   elements.backupBtn.addEventListener('click', createBackup);
   elements.refreshBtn.addEventListener('click', async () => {
     await refreshProjects();
@@ -331,6 +332,7 @@ async function refreshProjects() {
   const previousProjectId = currentProjectId;
   const data = await apiFetch(API.projects);
   projects = Array.isArray(data.projects) ? data.projects : [];
+  projects.sort(compareProjects);
   updateDropdown();
   renderDashboardCards();
   await refreshLockStatus();
@@ -367,7 +369,7 @@ function updateDropdown() {
   const projectsGroup = document.createElement('optgroup');
   projectsGroup.label = 'Projects';
   projects.forEach((project) => {
-    projectsGroup.append(createOption(`project:${project.id}`, project.name));
+    projectsGroup.append(createOption(`project:${project.id}`, `${project.pinned ? '📌 ' : ''}${project.name}`));
   });
   elements.projectDropdown.appendChild(projectsGroup);
 }
@@ -395,6 +397,23 @@ function getCurrentProject() {
   return currentProjectId ? getProjectById(currentProjectId) : null;
 }
 
+function compareProjects(a, b) {
+  const pinnedComparison = Number(Boolean(b.pinned)) - Number(Boolean(a.pinned));
+  if (pinnedComparison !== 0) {
+    return pinnedComparison;
+  }
+  return String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' });
+}
+
+function compareNotesNewestFirst(a, b) {
+  const aTime = Date.parse(a.noteDate || a.createdAt || '') || 0;
+  const bTime = Date.parse(b.noteDate || b.createdAt || '') || 0;
+  if (aTime !== bTime) {
+    return bTime - aTime;
+  }
+  return Number(b.id) - Number(a.id);
+}
+
 function setDashboardFilter(filterType) {
   dashboardFilter = filterType;
 
@@ -410,10 +429,12 @@ function setDashboardFilter(filterType) {
 function renderDashboardCards() {
   elements.projectCardsContainer.replaceChildren();
 
-  const visibleProjects = projects.filter((project) => {
-    const projectStatus = project.status || 'Active';
-    return dashboardFilter === 'All' || projectStatus === dashboardFilter;
-  });
+  const visibleProjects = projects
+    .filter((project) => {
+      const projectStatus = project.status || 'Active';
+      return dashboardFilter === 'All' || projectStatus === dashboardFilter;
+    })
+    .sort(compareProjects);
 
   if (visibleProjects.length === 0) {
     const emptyState = document.createElement('div');
@@ -437,6 +458,11 @@ function renderDashboardCards() {
     badge.className = `badge ${getBadgeClass(projectStatus)}`;
     badge.textContent = projectStatus;
 
+    const pinMarker = document.createElement('span');
+    pinMarker.className = 'pin-marker';
+    pinMarker.textContent = project.pinned ? '📌 Pinned' : '';
+    pinMarker.hidden = !project.pinned;
+
     const title = document.createElement('h3');
     title.textContent = project.name;
 
@@ -457,7 +483,7 @@ function renderDashboardCards() {
     progressBar.style.width = `${stats.perc}%`;
 
     progressContainer.appendChild(progressBar);
-    card.append(badge, title, assignee, etic, progress, progressContainer);
+    card.append(badge, pinMarker, title, assignee, etic, progress, progressContainer);
     elements.projectCardsContainer.appendChild(card);
   });
 }
@@ -509,6 +535,9 @@ function renderProject(project) {
   elements.projTotalTime.value = project.totalTime || '';
   elements.projEtic.value = project.etic || '';
   elements.projNotes.value = project.notes || '';
+  elements.pinProjectBtn.textContent = project.pinned ? 'Unpin Project' : 'Pin Project';
+  elements.pinProjectBtn.setAttribute('aria-pressed', project.pinned ? 'true' : 'false');
+  elements.projPinStatus.hidden = !project.pinned;
 
   elements.tableBody.replaceChildren();
 
@@ -618,6 +647,29 @@ async function saveCurrentProject() {
   }
 }
 
+async function toggleCurrentProjectPinned() {
+  const project = getCurrentProject();
+  if (!project) {
+    return;
+  }
+
+  try {
+    const data = await apiFetch(API.project(project.id), {
+      method: 'PATCH',
+      body: JSON.stringify({ pinned: !project.pinned })
+    });
+    replaceProject(data.project);
+    currentProjectId = data.project.id;
+    updateDropdown();
+    elements.projectDropdown.value = `project:${data.project.id}`;
+    renderProject(data.project);
+    renderDashboardCards();
+    showAlert(data.project.pinned ? 'Project pinned to the top.' : 'Project unpinned.', 'success');
+  } catch (error) {
+    showAlert(error.message, 'error');
+  }
+}
+
 function replaceProject(project) {
   const index = projects.findIndex((item) => String(item.id) === String(project.id));
   if (index >= 0) {
@@ -625,7 +677,7 @@ function replaceProject(project) {
   } else {
     projects.push(project);
   }
-  projects.sort((a, b) => a.name.localeCompare(b.name));
+  projects.sort(compareProjects);
 }
 
 async function createNewProject() {
@@ -637,7 +689,7 @@ async function createNewProject() {
   try {
     const data = await apiFetch(API.projects, {
       method: 'POST',
-      body: JSON.stringify({ name: newName.trim(), status: 'Active' })
+      body: JSON.stringify({ name: newName.trim(), status: 'Active', pinned: false })
     });
     replaceProject(data.project);
     updateDropdown();
@@ -800,7 +852,7 @@ async function refreshNotes() {
   try {
     const data = await apiFetch(API.notes);
     notes = Array.isArray(data.notes) ? data.notes : [];
-    notes.sort((a, b) => String(a.noteDate).localeCompare(String(b.noteDate)) || Number(a.id) - Number(b.id));
+    notes.sort(compareNotesNewestFirst);
     renderNotes();
   } catch (error) {
     showAlert(error.message, 'error');
@@ -913,7 +965,7 @@ async function createNote(event) {
       body: JSON.stringify(payload)
     });
     notes.push(data.note);
-    notes.sort((a, b) => String(a.noteDate).localeCompare(String(b.noteDate)) || Number(a.id) - Number(b.id));
+    notes.sort(compareNotesNewestFirst);
     renderNotes();
     clearNoteForm();
     showAlert('Note added.', 'success');
@@ -961,7 +1013,7 @@ async function saveNoteCard(card) {
     if (index >= 0) {
       notes[index] = data.note;
     }
-    notes.sort((a, b) => String(a.noteDate).localeCompare(String(b.noteDate)) || Number(a.id) - Number(b.id));
+    notes.sort(compareNotesNewestFirst);
     renderNotes();
     showAlert('Note saved.', 'success');
   } catch (error) {
