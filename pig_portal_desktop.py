@@ -274,6 +274,8 @@ class NetworkWriteLock:
         self.stale_seconds = stale_seconds
         self.token = secrets.token_hex(16)
         self.acquired = False
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
 
     def __enter__(self) -> "NetworkWriteLock":
         self.acquire()
@@ -289,8 +291,15 @@ class NetworkWriteLock:
             try:
                 self.db_path.parent.mkdir(parents=True, exist_ok=True)
                 os.mkdir(self.lock_dir)
-                self._write_owner()
-                self.acquired = True
+                try:
+                    self._write_owner()
+                    self.acquired = True
+                    self._start_heartbeat()
+                except Exception:
+                    # Never leave an ownerless lock behind when acquisition only
+                    # partially succeeds (disk full, permissions, disconnect, etc.).
+                    self._remove_owned_lock(allow_missing_owner=True)
+                    raise
                 return
             except FileExistsError:
                 last_owner = self.describe_owner()
@@ -316,6 +325,27 @@ class NetworkWriteLock:
         }
         with self.owner_path.open("w", encoding="utf-8") as handle:
             json.dump(owner, handle, indent=2)
+            handle.flush()
+
+    def _start_heartbeat(self) -> None:
+        interval = max(1.0, min(30.0, self.stale_seconds / 3.0))
+
+        def heartbeat() -> None:
+            while not self._heartbeat_stop.wait(interval):
+                try:
+                    owner = self._read_owner()
+                    if owner.get("token") != self.token:
+                        return
+                    os.utime(self.owner_path, None)
+                except FileNotFoundError:
+                    return
+                except Exception as error:
+                    logging.warning("Unable to refresh DB lock %s: %s", self.lock_dir, error)
+
+        self._heartbeat_thread = threading.Thread(
+            target=heartbeat, name="pig-portal-lock-heartbeat", daemon=True
+        )
+        self._heartbeat_thread.start()
 
     def _read_owner(self) -> dict[str, Any]:
         try:
@@ -341,8 +371,18 @@ class NetworkWriteLock:
     def _remove_if_stale(self) -> None:
         if self._lock_age_seconds() < self.stale_seconds:
             return
+        observed = self._read_owner()
+        if self._owner_process_is_alive(observed):
+            return
         owner = self.describe_owner()
         logging.warning("Removing stale PIG Portal DB lock owned by %s", owner)
+        # Re-read immediately before deletion. This prevents deleting a lock that
+        # was released and reacquired by somebody else during the stale check.
+        current = self._read_owner()
+        if observed.get("token") and current.get("token") != observed.get("token"):
+            return
+        if self._lock_age_seconds() < self.stale_seconds:
+            return
         try:
             shutil.rmtree(self.lock_dir)
         except FileNotFoundError:
@@ -350,17 +390,48 @@ class NetworkWriteLock:
         except Exception as error:
             logging.warning("Failed to remove stale lock %s: %s", self.lock_dir, error)
 
+    @staticmethod
+    def _owner_process_is_alive(owner: dict[str, Any]) -> bool:
+        if owner.get("host") != safe_host():
+            return False
+        try:
+            pid = int(owner.get("pid"))
+            if pid <= 0:
+                return False
+            os.kill(pid, 0)
+            return True
+        except PermissionError:
+            return True
+        except (OSError, TypeError, ValueError):
+            return False
+
+    def _remove_owned_lock(self, allow_missing_owner: bool = False) -> bool:
+        owner = self._read_owner()
+        if owner.get("token") != self.token and not (allow_missing_owner and not owner):
+            return False
+        try:
+            shutil.rmtree(self.lock_dir)
+            return True
+        except FileNotFoundError:
+            return True
+        except Exception as error:
+            logging.warning("Failed to remove DB lock %s: %s", self.lock_dir, error)
+            return False
+
     def release(self) -> None:
         if not self.acquired:
             return
+        self._heartbeat_stop.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=2.0)
         try:
-            owner = self._read_owner()
-            if owner.get("token") == self.token:
-                shutil.rmtree(self.lock_dir)
-        except FileNotFoundError:
-            pass
-        except Exception as error:
-            logging.warning("Failed to release DB lock %s: %s", self.lock_dir, error)
+            # Shared drives and antivirus can transiently hold owner.json open.
+            # Retry briefly, but never remove a lock whose token has changed.
+            for attempt in range(5):
+                if self._remove_owned_lock():
+                    break
+                if attempt < 4:
+                    time.sleep(0.1 * (attempt + 1))
         finally:
             self.acquired = False
 
@@ -419,11 +490,23 @@ def transaction() -> Iterable[sqlite3.Connection]:
         conn.execute("BEGIN IMMEDIATE")
         try:
             yield conn
-        except Exception:
-            conn.execute("ROLLBACK")
+        except BaseException:
+            if conn.in_transaction:
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    logging.exception("Failed to roll back database transaction")
             raise
         else:
-            conn.execute("COMMIT")
+            try:
+                conn.commit()
+            except BaseException:
+                if conn.in_transaction:
+                    try:
+                        conn.rollback()
+                    except sqlite3.Error:
+                        logging.exception("Failed to roll back after commit failure")
+                raise
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
